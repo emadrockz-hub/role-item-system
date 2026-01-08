@@ -1,9 +1,0 @@
-# secrets
-appsettings.Development.json
-appsettings.*.json
-!appsettings.json
-
-# build output
-**/bin/
-**/obj/
-.vs/

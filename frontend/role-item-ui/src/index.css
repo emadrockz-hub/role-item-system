@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+
+  /* THEME TOKENS (change here only) */
+  --teal-ink: #134E4A;   /* deep luxury teal */
+  --teal: #6DC3BB;       /* accent teal */
+  --page: #F6F8F9;       /* soft neutral page bg (not white) */
+  --line: #E5E7EB;       /* border */
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: var(--page);
+}

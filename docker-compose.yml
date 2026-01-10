@@ -1,0 +1,45 @@
+services:
+  db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: roleitems-db
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD}"
+    # For deployment, DO NOT expose SQL Server publicly.
+    # If you need local access from SSMS, temporarily uncomment the next 2 lines.
+    # ports:
+    #   - "1433:1433"
+    volumes:
+      - mssql_data:/var/opt/mssql
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: roleitems-api
+    environment:
+      ASPNETCORE_ENVIRONMENT: "Production"
+      ConnectionStrings__Default: "Server=db,1433;Database=${DB_NAME};User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True;"
+      Jwt__Key: "${JWT_KEY}"
+      Jwt__Issuer: "RoleBasedItemApi"
+      Jwt__Audience: "RoleBasedItemApiUsers"
+      Jwt__ExpiryMinutes: "60"
+    depends_on:
+      - db
+    ports:
+      - "5132:8080"
+
+  web:
+    build:
+      context: ./frontend/role-item-ui
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: "/api"
+    container_name: roleitems-web
+    depends_on:
+      - api
+    ports:
+      - "5174:80"
+
+volumes:
+  mssql_data:

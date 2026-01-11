@@ -1,65 +1,124 @@
-- name: Deploy on EC2
-  env:
-    APP_NAME: role-item-system
-    APP_ROOT: /var/www/roleitems
-    COMPOSE_FILE: docker-compose.yml
-    ENV_FILE: .env
-    KEEP_RELEASES: 5
-  run: |
-    ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes \
-      ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << SSH
-        set -euo pipefail
+name: Deploy to EC2 (Docker Compose)
 
-        # ---- values injected from GitHub runner into the remote script ----
-        APP_NAME="${{ env.APP_NAME }}"
-        APP_ROOT="${{ env.APP_ROOT }}"
-        COMPOSE_FILE="${{ env.COMPOSE_FILE }}"
-        ENV_FILE="${{ env.ENV_FILE }}"
-        KEEP_RELEASES="${{ env.KEEP_RELEASES }}"
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
 
-        RELEASES_DIR="$APP_ROOT/releases"
-        SHARED_DIR="$APP_ROOT/shared"
-        TS="$(date +%Y%m%d%H%M%S)"
-        NEW_RELEASE="$RELEASES_DIR/$TS"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-        echo "==> Deploying $APP_NAME to $NEW_RELEASE"
+      - name: Create deploy.tgz (tracked files only)
+        run: |
+          git ls-files -z | tar --null -T - -czf deploy.tgz
 
-        # ---- create dirs ----
-        sudo mkdir -p "$NEW_RELEASE" "$SHARED_DIR"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-tgz
+          path: deploy.tgz
+          if-no-files-found: error
 
-        # ---- extract artifact into the new release ----
-        sudo tar -xzf /tmp/deploy.tgz -C "$NEW_RELEASE"
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: deploy-tgz
+          path: .
 
-        # ---- write shared env file from secrets (overwrites each deploy) ----
-        sudo bash -c 'cat > "$1" <<EOF
-MSSQL_SA_PASSWORD=${{ secrets.SA_PASSWORD }}
-DB_NAME=${{ secrets.DB_NAME }}
-JWT_KEY=${{ secrets.JWT_KEY }}
-EOF' _ "$SHARED_DIR/$ENV_FILE"
-        sudo chmod 600 "$SHARED_DIR/$ENV_FILE"
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
-        # ---- symlink env into release ----
-        sudo ln -sfn "$SHARED_DIR/$ENV_FILE" "$NEW_RELEASE/$ENV_FILE"
+      - name: Create env file (runner)
+        env:
+          SA_PASSWORD: ${{ secrets.SA_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          JWT_KEY: ${{ secrets.JWT_KEY }}
+        run: |
+          umask 077
+          cat > app.env <<EOF
+MSSQL_SA_PASSWORD=$SA_PASSWORD
+DB_NAME=$DB_NAME
+JWT_KEY=$JWT_KEY
+EOF
 
-        # ---- flip current symlink ----
-        sudo ln -sfn "$NEW_RELEASE" "$APP_ROOT/current"
+      - name: Upload artifact + env to EC2
+        run: |
+          scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes \
+            ./deploy.tgz ./app.env \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/
 
-        # ---- sanity checks ----
-        if [ ! -f "$APP_ROOT/current/$COMPOSE_FILE" ]; then
-          echo "ERROR: $COMPOSE_FILE not found in release. Listing current dir:"
-          ls -la "$APP_ROOT/current"
-          exit 1
-        fi
+      - name: Deploy on EC2
+        env:
+          APP_NAME: role-item-system
+          APP_ROOT: /var/www/roleitems
+          COMPOSE_FILE: docker-compose.yml
+          ENV_FILE: .env
+          KEEP_RELEASES: "5"
+        run: |
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} <<'SSH'
+              set -euo pipefail
 
-        # ---- run docker compose ----
-        cd "$APP_ROOT/current"
-        sudo docker --version
-        sudo docker compose version
+              APP_NAME="role-item-system"
+              APP_ROOT="/var/www/roleitems"
+              COMPOSE_FILE="docker-compose.yml"
+              ENV_FILE=".env"
+              KEEP_RELEASES=5
 
-        sudo docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --build --remove-orphans
+              RELEASES_DIR="$APP_ROOT/releases"
+              SHARED_DIR="$APP_ROOT/shared"
+              TS="$(date +%Y%m%d%H%M%S)"
+              NEW_RELEASE="$RELEASES_DIR/$TS"
 
-        # ---- keep last N releases ----
-        sudo bash -c 'ls -1dt "$1"/* | tail -n +"$2" | xargs -r rm -rf' _ "$RELEASES_DIR" "$((KEEP_RELEASES+1))"
+              echo "==> Deploying $APP_NAME"
+              echo "==> New release: $NEW_RELEASE"
 
-        echo "==> Done. Current -> $(readlink -f "$APP_ROOT/current")"
-      SSH
+              sudo mkdir -p "$NEW_RELEASE" "$SHARED_DIR"
+
+              # Extract code into the new release
+              sudo tar -xzf /tmp/deploy.tgz -C "$NEW_RELEASE"
+
+              # Install shared .env from uploaded file (safe for quotes/$)
+              sudo mv /tmp/app.env "$SHARED_DIR/$ENV_FILE"
+              sudo chmod 600 "$SHARED_DIR/$ENV_FILE"
+
+              # Symlink env into release
+              sudo ln -sfn "$SHARED_DIR/$ENV_FILE" "$NEW_RELEASE/$ENV_FILE"
+
+              # Flip current symlink
+              sudo ln -sfn "$NEW_RELEASE" "$APP_ROOT/current"
+
+              cd "$APP_ROOT/current"
+
+              # Sanity check
+              if [ ! -f "$COMPOSE_FILE" ]; then
+                echo "ERROR: $COMPOSE_FILE not found in $(pwd)"
+                echo "Directory contents:"
+                ls -la
+                exit 1
+              fi
+
+              # Verify Docker + Compose v2
+              sudo docker --version
+              sudo docker compose version
+
+              # Deploy containers
+              sudo docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --build --remove-orphans
+
+              # Keep last N releases
+              sudo bash -c 'ls -1dt "$1"/* | tail -n +"$2" | xargs -r rm -rf' _ "$RELEASES_DIR" "$((KEEP_RELEASES+1))"
+
+              echo "==> Done. Current -> $(readlink -f "$APP_ROOT/current")"
+SSH

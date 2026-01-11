@@ -146,4 +146,4 @@ jobs:
             fi
 
             echo "DEPLOY_OK"
-SSH
+          SSH

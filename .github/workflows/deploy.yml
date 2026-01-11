@@ -40,7 +40,8 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Create env file (runner)
+      # Create env locally so any characters in secrets are safe (no quoting issues in SSH heredocs).
+      - name: Create app.env (runner)
         env:
           SA_PASSWORD: ${{ secrets.SA_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
@@ -53,19 +54,13 @@ DB_NAME=$DB_NAME
 JWT_KEY=$JWT_KEY
 EOF
 
-      - name: Upload artifact + env to EC2
+      - name: Upload deploy.tgz + app.env to EC2
         run: |
           scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes \
             ./deploy.tgz ./app.env \
             ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/
 
       - name: Deploy on EC2
-        env:
-          APP_NAME: role-item-system
-          APP_ROOT: /var/www/roleitems
-          COMPOSE_FILE: docker-compose.yml
-          ENV_FILE: .env
-          KEEP_RELEASES: "5"
         run: |
           ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes \
             ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} <<'SSH'
@@ -73,24 +68,25 @@ EOF
 
               APP_NAME="role-item-system"
               APP_ROOT="/var/www/roleitems"
+              RELEASES_DIR="$APP_ROOT/releases"
+              SHARED_DIR="$APP_ROOT/shared"
               COMPOSE_FILE="docker-compose.yml"
               ENV_FILE=".env"
               KEEP_RELEASES=5
 
-              RELEASES_DIR="$APP_ROOT/releases"
-              SHARED_DIR="$APP_ROOT/shared"
               TS="$(date +%Y%m%d%H%M%S)"
               NEW_RELEASE="$RELEASES_DIR/$TS"
 
               echo "==> Deploying $APP_NAME"
               echo "==> New release: $NEW_RELEASE"
 
+              # Ensure dirs exist
               sudo mkdir -p "$NEW_RELEASE" "$SHARED_DIR"
 
-              # Extract code into the new release
+              # Extract tracked archive into the new release
               sudo tar -xzf /tmp/deploy.tgz -C "$NEW_RELEASE"
 
-              # Install shared .env from uploaded file (safe for quotes/$)
+              # Install shared env (safe: comes as a file)
               sudo mv /tmp/app.env "$SHARED_DIR/$ENV_FILE"
               sudo chmod 600 "$SHARED_DIR/$ENV_FILE"
 
@@ -102,19 +98,17 @@ EOF
 
               cd "$APP_ROOT/current"
 
-              # Sanity check
+              # Sanity checks
               if [ ! -f "$COMPOSE_FILE" ]; then
                 echo "ERROR: $COMPOSE_FILE not found in $(pwd)"
-                echo "Directory contents:"
                 ls -la
                 exit 1
               fi
 
-              # Verify Docker + Compose v2
               sudo docker --version
               sudo docker compose version
 
-              # Deploy containers
+              # Deploy
               sudo docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --build --remove-orphans
 
               # Keep last N releases

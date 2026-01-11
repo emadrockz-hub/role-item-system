@@ -1,0 +1,174 @@
+name: Deploy (Docker Compose -> EC2)
+
+on:
+  push:
+    branches: ["master"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APP_NAME: roleitems
+  APP_ROOT: /var/www/roleitems
+  COMPOSE_FILE: docker-compose.yml
+  ENV_FILE: .env
+  KEEP_RELEASES: "5"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create artifact (deploy.tgz)
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf deploy.tgz \
+            --exclude=".git" \
+            --exclude="**/bin" \
+            --exclude="**/obj" \
+            --exclude="node_modules" \
+            --exclude=".vs" \
+            --exclude=".idea" \
+            .
+          ls -lah deploy.tgz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-tgz
+          path: deploy.tgz
+          if-no-files-found: error
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: deploy-tgz
+
+      - name: Debug secrets present (safe)
+        shell: bash
+        env:
+          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          SA_PASSWORD: ${{ secrets.SA_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          JWT_KEY: ${{ secrets.JWT_KEY }}
+        run: |
+          set -euo pipefail
+          echo "EC2_HOST set?  $([ -n "${EC2_HOST:-}" ] && echo YES || echo NO)"
+          echo "EC2_USER set?  $([ -n "${EC2_USER:-}" ] && echo YES || echo NO)"
+          echo "EC2_SSH_PRIVATE_KEY set? $([ -n "${EC2_SSH_PRIVATE_KEY:-}" ] && echo YES || echo NO)"
+          echo "SA_PASSWORD set? $([ -n "${SA_PASSWORD:-}" ] && echo YES || echo NO)"
+          echo "DB_NAME set? $([ -n "${DB_NAME:-}" ] && echo YES || echo NO)"
+          echo "JWT_KEY set? $([ -n "${JWT_KEY:-}" ] && echo YES || echo NO)"
+          echo "EC2_SSH_PRIVATE_KEY bytes: ${#EC2_SSH_PRIVATE_KEY}"
+
+      - name: Setup SSH (pinpoint)
+        shell: bash
+        env:
+          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          set -x
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          if [ -z "${EC2_SSH_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: EC2_SSH_PRIVATE_KEY secret is empty or not available to this workflow."
+            exit 1
+          fi
+
+          printf "%s" "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          tr -d '\r' < ~/.ssh/id_rsa > ~/.ssh/id_rsa.clean && mv ~/.ssh/id_rsa.clean ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/id_rsa -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "${{ secrets.EC2_USER }}@$EC2_HOST" "echo SSH_OK"
+
+      - name: Upload deploy.tgz to EC2
+        shell: bash
+        run: |
+          scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes \
+            deploy.tgz "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/deploy.tgz"
+
+      - name: Atomic deploy (releases + symlink + docker compose up)
+        shell: bash
+        env:
+          SA_PASSWORD: ${{ secrets.SA_PASSWORD }} # keep secret name as-is
+          DB_NAME: ${{ secrets.DB_NAME }}
+          JWT_KEY: ${{ secrets.JWT_KEY }}
+        run: |
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" << 'SSH'
+            set -euo pipefail
+
+            APP_ROOT="${{ env.APP_ROOT }}"
+            COMPOSE_FILE="${{ env.COMPOSE_FILE }}"
+            ENV_FILE="${{ env.ENV_FILE }}"
+            KEEP_RELEASES="${{ env.KEEP_RELEASES }}"
+
+            TS="$(date +%Y%m%d%H%M%S)"
+            RELEASE_DIR="$APP_ROOT/releases/$TS"
+            SHARED_DIR="$APP_ROOT/shared"
+            CURRENT_DIR="$APP_ROOT/current"
+
+            # prerequisites
+            command -v docker >/dev/null 2>&1 || { echo "ERROR: docker not installed"; exit 1; }
+            docker compose version >/dev/null 2>&1 || { echo "ERROR: docker compose plugin missing"; exit 1; }
+
+            sudo mkdir -p "$APP_ROOT/releases" "$RELEASE_DIR" "$SHARED_DIR"
+
+            # extract new release
+            sudo tar -xzf /tmp/deploy.tgz -C "$RELEASE_DIR"
+            sudo rm -f /tmp/deploy.tgz
+
+            # Ensure shared .env exists (create/overwrite required keys each deploy)
+            sudo touch "$SHARED_DIR/$ENV_FILE"
+            sudo chmod 600 "$SHARED_DIR/$ENV_FILE" || true
+
+            # IMPORTANT:
+            # Your compose uses MSSQL_SA_PASSWORD, but your GitHub secret is SA_PASSWORD.
+            # We write MSSQL_SA_PASSWORD into .env to avoid renaming secrets.
+            sudo sed -i '/^MSSQL_SA_PASSWORD=/d' "$SHARED_DIR/$ENV_FILE" || true
+            echo "MSSQL_SA_PASSWORD=${SA_PASSWORD}" | sudo tee -a "$SHARED_DIR/$ENV_FILE" >/dev/null
+
+            # DB_NAME and JWT_KEY (used by API container env)
+            sudo sed -i '/^DB_NAME=/d' "$SHARED_DIR/$ENV_FILE" || true
+            echo "DB_NAME=${DB_NAME}" | sudo tee -a "$SHARED_DIR/$ENV_FILE" >/dev/null
+
+            sudo sed -i '/^JWT_KEY=/d' "$SHARED_DIR/$ENV_FILE" || true
+            echo "JWT_KEY=${JWT_KEY}" | sudo tee -a "$SHARED_DIR/$ENV_FILE" >/dev/null
+
+            # symlink shared .env into this release
+            sudo ln -sfn "$SHARED_DIR/$ENV_FILE" "$RELEASE_DIR/$ENV_FILE"
+
+            # flip current -> new release
+            sudo ln -sfn "$RELEASE_DIR" "$CURRENT_DIR"
+
+            cd "$CURRENT_DIR"
+
+            # bring up stack
+            docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --build --remove-orphans
+            docker compose -f "$COMPOSE_FILE" ps
+
+            # keep last N releases
+            if [ -n "$KEEP_RELEASES" ]; then
+              sudo ls -1dt "$APP_ROOT"/releases/* 2>/dev/null | tail -n +$((KEEP_RELEASES+1)) | sudo xargs -r rm -rf
+            fi
+
+            echo "DEPLOY_OK"
+          SSH

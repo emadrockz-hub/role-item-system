@@ -71,6 +71,7 @@ jobs:
           EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
           set -euo pipefail
+
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
@@ -97,13 +98,9 @@ jobs:
 
       - name: Atomic deploy (releases + symlink + docker compose up)
         shell: bash
-        env:
-          SA_PASSWORD: ${{ secrets.SA_PASSWORD }}
-          DB_NAME: ${{ secrets.DB_NAME }}
-          JWT_KEY: ${{ secrets.JWT_KEY }}
         run: |
           ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes \
-            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" << 'SSH'
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" << SSH
             set -euo pipefail
 
             APP_ROOT="${{ env.APP_ROOT }}"
@@ -128,13 +125,13 @@ jobs:
             sudo chmod 600 "$SHARED_DIR/$ENV_FILE" || true
 
             sudo sed -i '/^MSSQL_SA_PASSWORD=/d' "$SHARED_DIR/$ENV_FILE" || true
-            echo "MSSQL_SA_PASSWORD=${SA_PASSWORD}" | sudo tee -a "$SHARED_DIR/$ENV_FILE" >/dev/null
+            echo "MSSQL_SA_PASSWORD=${{ secrets.SA_PASSWORD }}" | sudo tee -a "$SHARED_DIR/$ENV_FILE" >/dev/null
 
             sudo sed -i '/^DB_NAME=/d' "$SHARED_DIR/$ENV_FILE" || true
-            echo "DB_NAME=${DB_NAME}" | sudo tee -a "$SHARED_DIR/$ENV_FILE" >/dev/null
+            echo "DB_NAME=${{ secrets.DB_NAME }}" | sudo tee -a "$SHARED_DIR/$ENV_FILE" >/dev/null
 
             sudo sed -i '/^JWT_KEY=/d' "$SHARED_DIR/$ENV_FILE" || true
-            echo "JWT_KEY=${JWT_KEY}" | sudo tee -a "$SHARED_DIR/$ENV_FILE" >/dev/null
+            echo "JWT_KEY=${{ secrets.JWT_KEY }}" | sudo tee -a "$SHARED_DIR/$ENV_FILE" >/dev/null
 
             sudo ln -sfn "$SHARED_DIR/$ENV_FILE" "$RELEASE_DIR/$ENV_FILE"
             sudo ln -sfn "$RELEASE_DIR" "$CURRENT_DIR"
@@ -149,4 +146,4 @@ jobs:
             fi
 
             echo "DEPLOY_OK"
-          SSH
+SSH

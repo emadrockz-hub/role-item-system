@@ -40,7 +40,6 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
-      # Create env locally so any characters in secrets are safe (no quoting issues in SSH heredocs).
       - name: Create app.env (runner)
         env:
           SA_PASSWORD: ${{ secrets.SA_PASSWORD }}
@@ -48,11 +47,8 @@ jobs:
           JWT_KEY: ${{ secrets.JWT_KEY }}
         run: |
           umask 077
-          cat > app.env <<EOF
-MSSQL_SA_PASSWORD=$SA_PASSWORD
-DB_NAME=$DB_NAME
-JWT_KEY=$JWT_KEY
-EOF
+          printf "MSSQL_SA_PASSWORD=%s\nDB_NAME=%s\nJWT_KEY=%s\n" \
+            "$SA_PASSWORD" "$DB_NAME" "$JWT_KEY" > app.env
 
       - name: Upload deploy.tgz + app.env to EC2
         run: |
@@ -80,17 +76,16 @@ EOF
               echo "==> Deploying $APP_NAME"
               echo "==> New release: $NEW_RELEASE"
 
-              # Ensure dirs exist
               sudo mkdir -p "$NEW_RELEASE" "$SHARED_DIR"
 
-              # Extract tracked archive into the new release
+              # Extract new release
               sudo tar -xzf /tmp/deploy.tgz -C "$NEW_RELEASE"
 
-              # Install shared env (safe: comes as a file)
+              # Install shared env
               sudo mv /tmp/app.env "$SHARED_DIR/$ENV_FILE"
               sudo chmod 600 "$SHARED_DIR/$ENV_FILE"
 
-              # Symlink env into release
+              # Link env into release
               sudo ln -sfn "$SHARED_DIR/$ENV_FILE" "$NEW_RELEASE/$ENV_FILE"
 
               # Flip current symlink
@@ -98,7 +93,6 @@ EOF
 
               cd "$APP_ROOT/current"
 
-              # Sanity checks
               if [ ! -f "$COMPOSE_FILE" ]; then
                 echo "ERROR: $COMPOSE_FILE not found in $(pwd)"
                 ls -la
@@ -108,11 +102,10 @@ EOF
               sudo docker --version
               sudo docker compose version
 
-              # Deploy
               sudo docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --build --remove-orphans
 
-              # Keep last N releases
-              sudo bash -c 'ls -1dt "$1"/* | tail -n +"$2" | xargs -r rm -rf' _ "$RELEASES_DIR" "$((KEEP_RELEASES+1))"
+              # Keep last 5 releases
+              sudo bash -c 'ls -1dt "$1"/* | tail -n +6 | xargs -r rm -rf' _ "$RELEASES_DIR"
 
               echo "==> Done. Current -> $(readlink -f "$APP_ROOT/current")"
 SSH

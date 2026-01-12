@@ -5,10 +5,8 @@ services:
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD}"
-    # For deployment, DO NOT expose SQL Server publicly.
-    # If you need local access from SSMS, temporarily uncomment the next 2 lines.
-    # ports:
-    #   - "1433:1433"
+    ports:
+      - "1435:1433"
     volumes:
       - mssql_data:/var/opt/mssql
 

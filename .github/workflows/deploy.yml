@@ -95,6 +95,7 @@ jobs:
 
               if [ ! -f "$COMPOSE_FILE" ]; then
                 echo "ERROR: $COMPOSE_FILE not found in $(pwd)"
+                echo "Directory contents:"
                 ls -la
                 exit 1
               fi
@@ -108,4 +109,4 @@ jobs:
               sudo bash -c 'ls -1dt "$1"/* | tail -n +6 | xargs -r rm -rf' _ "$RELEASES_DIR"
 
               echo "==> Done. Current -> $(readlink -f "$APP_ROOT/current")"
-SSH
+          SSH
